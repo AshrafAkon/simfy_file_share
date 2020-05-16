@@ -3,6 +3,12 @@
 include 'auth.php';
 //and ($_FILES['split_file']['error'] == 1) 
 
+//header("Access-Control-Allow-Origin: *");
+//header("Access-Control-Allow-Headers: Content-Type");
+//header("Content-Type: application/json");
+//$post_json = file_get_contents("php://input");
+//$_POST = json_decode($post_json, true);
+
 if($_POST['security_key'] == $security_key){
 
     if(isset($_FILES['split_file']) and ($_FILES['split_file']['error'] == 0) and isset($_POST['id']) and isset($_POST['file_name']) and 
