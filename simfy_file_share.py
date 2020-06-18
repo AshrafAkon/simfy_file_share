@@ -1,6 +1,12 @@
 # Author: Ashraful Firoz
 # There are some repetative code here and there.
 # I will try to fix them in the next update
+
+# important notice: files should be encrypted in client side
+# no encryption is done on the server side.
+# every file has a unique data_jey. thats refered as
+# data_key or info_dict['data_key']
+
 import json
 import hashlib
 import time
@@ -29,23 +35,18 @@ from tkinter import ttk, VERTICAL, HORIZONTAL, N, S, E, W, NW, SE, SW
 from config import hard_coded_url, most_working_thread
 from config import wait_time_before_trying_missing_chunks_download
 from config import wait_time_before_trying_failed_uploads, security_key
+import random
+import string
+import sqlite3
+from sqlite3 import Error
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
+from Crypto.Util.Padding import unpad
 
-# important notice: files are not encrypted
-# so its as safe as the hosting used
-# security_key is the key thats going to be used
-# to validate if you have access to the server
-# on the server side. every request will check
-# if the security key match.
-# in the auth.php on the server section you can
-# define security_key. make sure they both math
-# otherwise server response will be invalid
 
-# every file has a unique security key. thats refered as
-# data_key or info_dict['dir_to_save_chunk']
-
-# this user agent will be sent to the server with post.
 # without a proper user agent some shared hosting
 # will block the request
+# user agent to be sent with every request
 user_agent = """Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.130 Safari/537.36"""
 
 
@@ -53,15 +54,35 @@ os_platform = platform.system()  # os_platform="Linux" for linux platforms
 download_chunk_queue = queue.Queue()
 failed_chunk_queue = queue.Queue()
 upload_exists_queue = queue.Queue()
-download_exists_queue = queue.Queue()
+
 main_processing_queue = queue.Queue()
 console_display_queue = queue.Queue()
+active_workers = queue.Queue()
+
+
+# if any of the chunk's hash doesnt match then
+# it will be pushed to file_compormised_queue
+file_compromised_queue = queue.Queue()
+
 
 logger = logging.getLogger(__name__)
 
-# this is to calculate chunk size
-kb = 1000
-mb = kb * 1000
+# this is to calculate chunk size in bytes
+# moving from SI kilo(1000) to binary kilo(1024)
+kb = 1024
+mb = kb * 1024
+
+
+def randomString(stringLength=8):
+    letters = string.ascii_lowercase
+    return ''.join(random.choice(letters) for i in range(stringLength))
+
+
+def parselink(param, given_link):
+    a = given_link.split("&")
+    for x in a:
+        if x.split("=")[0] == param:
+            return x.split("=")[1]
 
 
 def console_display(msg_arr):
@@ -90,6 +111,7 @@ class UploadSection:
         self.filename = ""
         self.data_key = ""
         self.root = root
+        self.download_exists_queue = queue.Queue()
 
         # we need to use global. because if we dont
         # then python's garbage collector will eat
@@ -101,7 +123,7 @@ class UploadSection:
         global upload_button_upload_section
         global photo_data_key_button
         global host_up_power_button_photo
-        global photo_copy_direct_link
+        #global photo_copy_direct_link
 
         photo_choose_file_button = tk.PhotoImage(
             master=self.root, file='support_files/sf.png')
@@ -118,12 +140,12 @@ class UploadSection:
         upload_button_upload_section.grid(column=1, row=0, pady=10, sticky=W)
 
         # Copy Direct Link
-        photo_copy_direct_link = tk.PhotoImage(
-            master=self.root, file='support_files/copy_direct_link.png')
-        copy_direct_link = tk.Button(frame, text="Upload", image=photo_copy_direct_link,
-                                     command=self.copy_direct_link, height=60,
-                                     width=60, borderwidth=1)
-        copy_direct_link.grid(column=2, row=0, pady=10, sticky=W, padx=10)
+        # photo_copy_direct_link = tk.PhotoImage(
+        #     master=self.root, file='support_files/copy_direct_link.png')
+        # copy_direct_link = tk.Button(frame, text="Upload", image=photo_copy_direct_link,
+        #                              command=self.copy_direct_link, height=60,
+        #                              width=60, borderwidth=1)
+        # copy_direct_link.grid(column=2, row=0, pady=10, sticky=W, padx=10)
 
         # server: label
         tk.Label(self.frame, text='Server:').grid(column=0, row=1, sticky=W)
@@ -147,7 +169,7 @@ class UploadSection:
         # host_entry should be disabled for basic.
         # set the basic host in support_files/config.txt
         self.host_entry.configure(state=tk.DISABLED)
-        tk.Label(self.frame, text='File Security Key:').grid(
+        tk.Label(self.frame, text='Download link:').grid(
             column=0, row=2, sticky=W, pady=5)
 
         # data_key_box holds the file security key
@@ -207,7 +229,7 @@ class UploadSection:
         print("direct link is: ", host_entry.get() +
               "/index.html?security_key="+self.data_key_box.get())
         pyperclip.copy(host_entry.get() +
-                       "/index.html?security_key="+self.data_key_box.get())
+                       ":3000/download?key="+self.data_key_box.get())
 
     def visit_example(self):
         self.list1 = []
@@ -327,13 +349,12 @@ class UploadSection:
                 final_host = self.host_entry.get()
             console_display("Using server: " + final_host)
             self.upload_progress_bar(False, 1)
-            file_upload = FileHandle(data_file=self.filename, url=final_host,
-                                     console=self.console,
-                                     root=self.root, progress_bar=self.upload_progress_bar,
-                                     data_key_box_str=self.data_key_box_str, filename=self.filename)
+            file_upload = UploadHandler(data_file=self.filename, url=final_host,
+                                        data_key_box_str=self.data_key_box_str,
+                                        root=self.root, progress_bar=self.upload_progress_bar)
 
             # putting file_upload.splitfiles() in the main queue to execute
-            main_processing_queue.put(file_upload.splitfiles)
+            main_processing_queue.put(file_upload.start_upload)
             select_file_button.configure(state=tk.DISABLED)
             upload_button_upload_section.configure(state=tk.DISABLED)
 
@@ -350,7 +371,7 @@ class DownloadSection:
         self.console = console
         self.frame = frame
 
-        tk.Label(self.frame, text='File Security Key:').grid(
+        tk.Label(self.frame, text='Download Link:').grid(
             column=0, row=1, sticky=W, pady=10)
         self.data_key_box_var = tk.StringVar(frame, value="")
         self.data_key_box = tk.Entry(
@@ -535,8 +556,9 @@ class DownloadSection:
         if(len(data_key) > 0):
 
             self.download_progress_bar(1, 1)
-            temp_files = FileHandle(info_dict={'dir_to_save_chunk': data_key},
-                                    url=final_host, console=self.console,  root=self.root, progress_bar=self.download_progress_bar)
+            temp_files = DownloadHandler(
+                data_key=data_key, url=final_host,  root=self.root,
+                progress_bar=self.download_progress_bar, download_link=self.data_key_box.get())
 
             # putting download_info_dict in the main
             # processing queue and getting the chain started
@@ -603,15 +625,15 @@ class ConsoleUi:
     # logger.log(lvl, self.message.get())
 
 
-class FileHandle():
-    def __init__(self, data_file=None, info_dict={},
-                 url=hard_coded_url, console=None, root=None, progress_bar=None,
-                 data_key_box_str=None, filename=None):
+class DownloadHandler():
+    def __init__(self, data_key="", root=None, url=hard_coded_url, progress_bar=None,
+                 data_key_box_str=None, download_link=""):
         self.progress_bar = progress_bar
-        self.data_key_box_str = data_key_box_str
-        self.filename = filename
+        self.download_link = download_link
         self.root = root
-        self.console = console
+        self.data_key = parselink('id', self.download_link)
+        self.key = parselink("key", self.download_link)
+        self.checksum = parselink('checksum', self.download_link)
         self.url = url
         if len(self.url) > 5:
             if self.url[-1] == "/":
@@ -626,18 +648,11 @@ class FileHandle():
             upload_button_upload_section.configure(state=tk.NORMAL)
             select_file_button.configure(state=tk.NORMAL)
             return
-        self.info_dict = info_dict
-        self.secure_key = "123456"
-        if os.path.isdir(os.path.join(Path.home(), "Downloads", "uploads_of_file_sharing")) is False:
-            os.mkdir(os.path.join(Path.home(), "Downloads",
-                                  "uploads_of_file_sharing"))
 
         if os.path.isdir(os.path.join(Path.home(), "Downloads")) is False:
             os.mkdir(os.path.join(Path.home(), "Downloads"))
         if os.path.isdir(os.path.join(Path.home(), "Downloads", "downloads_data")) is False:
             os.mkdir(os.path.join(Path.home(), "Downloads", "downloads_data"))
-        if len(self.info_dict) > 1:
-            self.dir_to_save_chunk = info_dict['dir_to_save_chunk']
 
         # this counter are used to determine how many timer certain
         # function has failed due to no inter or connection error to the server
@@ -646,149 +661,91 @@ class FileHandle():
         self.download_chunk_thread_count = 0
         self.merge_files_try_count = 0
         self.missing_chunks_is_retry = False
-        # missing_chunks_is_retry = False
-        if data_file is not None:
-            self.data_file = data_file
-            self.dir_to_save_chunk = os.path.basename(data_file).split(
-                ".")[0].replace(" ", "_")+hashgen(data_file)
-            if os.path.isdir(os.path.join(Path.home(), "Downloads", "uploads_of_file_sharing", self.dir_to_save_chunk)) is False:
-                os.mkdir(os.path.join(Path.home(), "Downloads",
-                                      "uploads_of_file_sharing", self.dir_to_save_chunk))
-
-            if(os.path.getsize(data_file) <= 5*mb):
-                self.chunk_size = os.path.getsize(data_file)
-                self.chunk_count = 1
-            else:
-                self.chunk_size = 5*mb
-                self.chunk_count = math.ceil(
-                    os.path.getsize(data_file) / self.chunk_size)
-
-            self.info_dict["chunk_size"] = self.chunk_size
-            self.info_dict["chunk_count"] = self.chunk_count
-            self.info_dict['dir_to_save_chunk'] = self.dir_to_save_chunk
-            self.info_dict['file_serial'] = {}
-            self.info_dict['extension'] = os.path.basename(data_file).split(
-                ".")[-1]  # track records of id and file name
-            self.info_dict['file_size'] = os.path.getsize(data_file)
-
-            console_display("Minimum chunk size is " +
-                            str(info_dict["chunk_size"]/mb)+" mb")
-            console_display("File is divided into " +
-                            str(info_dict['chunk_count'])+" chunks.")
-
-    def splitfiles(self):
-        start = timeit.default_timer()
-        try:
-            # if error with host
-            print(self.data_file)
-        except:
-            upload_button_upload_section.configure(state=tk.NORMAL)
-            select_file_button.configure(state=tk.NORMAL)
-            return
-        with open(self.data_file, "rb") as f:
-            for idd in range(self.info_dict['chunk_count']):
-                chunk = f.read(self.info_dict['chunk_size'])
-                chunk_file_name = hashlib.md5(chunk).hexdigest()
-
-                tempname = os.path.join(Path.home(
-                ), "Downloads", "uploads_of_file_sharing", self.dir_to_save_chunk, chunk_file_name)
-                if os.path.isfile(tempname) is False:
-                    with open(tempname, "wb") as w:
-                        w.write(chunk)
-
-                self.info_dict['file_serial'][str(idd)] = chunk_file_name
-                # print("progress 651")
-                self.progress_bar(20, int(self.info_dict['chunk_count']))
-
-        self.data_key_box_str.set(self.info_dict['dir_to_save_chunk'])
-        main_processing_queue.put(self.upload_dict_info)
-        stop = timeit.default_timer()
-        self.upload_dict_info_count = 0
-        console_display('Spilitting files took ' +
-                        str(int(stop - start))+" seconds.")
-
-    def upload_dict_info(self):
-        """should only be called after split files. other info_dict will be broken"""
-
-        try:
-            requests.post(url=self.url+"/dict_up.php",
-                          json={'security_key': security_key, 'info_dict': json.dumps(self.info_dict),
-                                'data_key': self.info_dict['dir_to_save_chunk']},
-                          headers={'User-Agent': user_agent, 'Content-Type': 'application/json'})
-
-            # print(chunk_verify.text)
-            print("dict upload done")
-            main_processing_queue.put(self.upload_chunks)
-            # break break if all goes well
-        except ConnectionError as e:
-            print(e)
-            print("error in dict up")
-            if self.upload_dict_info_count >= 30:
-                self.upload_dict_info_count = 0
-                upload_button_upload_section.configure(state=tk.NORMAL)
-                select_file_button.configure(state=tk.NORMAL)
-
-                console_display(
-                    ["Upload failed due to no internet, try again later.", "ERROR"])
-                return
-            console_display(
-                ["No internet connection, Trying in 5 seconds", "ERROR"])
-            self.upload_dict_info_count += 1
-            self.root.after(5000, self.upload_dict_info)
-            # self.root.update_idletasks()
-            # self.root.update()
-        except Exception as e:
-            print(e)
 
     def download_info_dict(self):
-
+        self.merge_files_try_count = 0
         self.missing_chunks_is_retry = False
+        self.download_exists_queue = queue.Queue()
+        self.progress_bar(1, 1)
         try:
-            print("info")
             console_display("File download started")
-            revive_data_req = requests.post(self.url+"/dict_up.php",
-                                            json={'security_key': security_key,
-                                                  'data_key': self.info_dict['dir_to_save_chunk'],
-                                                  "secure_key": self.secure_key, 'download_info_dict': 'true'},
-                                            headers={'User-Agent': user_agent,
-                                                     'Content-Type': 'application/json'})
-            if(len(revive_data_req.text)) == 0:
-                # if there is no data that means there
-                # is no file with this data key.
+            encrypted_info_dict = requests.post(self.url+"/process_info_dict.php",
+                                                data={'security_key': security_key,
+                                                      'data_key': self.data_key,
+                                                      'download_info_dict': 'true'},
+                                                headers={'User-Agent': user_agent}).content
+
+            #revive_data_req = json.loads(revive_data_req)
+            if len(encrypted_info_dict) == 0:
+                # if len 0 that means no data is present
+
                 console_display(
-                    ["File not found for security key: " + self.info_dict['dir_to_save_chunk'], "ERROR"])
+                    ["File not found for id: "
+                     + self.data_key, "ERROR"]
+                )
                 # print("progress 710")
                 self.progress_bar(False, 1)
                 download_button.configure(state=tk.NORMAL)
                 # self.root.update_idletasks()
                 # self.root.update()
                 return
-            # return #to return from function
-            self.info_dict = json.loads(revive_data_req.text)
-            # global info_dict_pr
-            # info_dict_pr = self.info_dict
-            # print(self.info_dict)
-            console_display("File Information Downloaded")
 
-            print("info dict downloaded")
+            iv = encrypted_info_dict[0:16]
+            key = bytes.fromhex(self.key)
+            self.info_dict = json.loads(unpad(AES.new(key, AES.MODE_CBC, iv).decrypt(
+                encrypted_info_dict[16:]), AES.block_size))
+
+            self.progress_bar(1, 1)
+
+            #console_display("File Information Downloaded")
+
+            logging.info("info dict downloaded")
             if(len(self.info_dict) <= 1):
+                logging.error("info_dict returned empty")
                 console_display("File not found on server")
-                print("File not found on server")
                 download_button.configure(state='tk.NORMAL')
                 return
-            # print("progress 730")
+
+            # increasing progress bar 1%
             self.progress_bar(1, 1)
             console_display("Downloading Chunks")
-            global if_download_file_exists
 
-            if_download_file_exists = False
-            if os.path.isfile(os.path.join(Path.home(), "Downloads",
-                                           self.info_dict['dir_to_save_chunk'][0:-32]) + "."+self.info_dict['extension']):
-                if_download_file_exists = True
-                main_processing_queue.put(self.mergefiles)
+            # populating download_chunk_queue with
+            # all chunks_name. later worker process
+            # will get a chunk name form this queue
+            # and start downloading process
+            # chunk_name is a two element list. first
+            # is the name and 2nd one is sha256 hash
+            # to verify chunk integrity
+            for chunk_info in self.info_dict['file_serial']:
+                # print(chunk_name)
+                download_chunk_queue.put(chunk_info)
+            finished_file_name = os.path.join(Path.home(), "Downloads",
+                                              self.info_dict['file_name'])
+            if os.path.isfile(finished_file_name):
+                # file exists. finish_download will check if
+                # the file is valid
+                print("exits")
+                if os.path.getsize(finished_file_name) == self.info_dict['file_size']:
 
-            else:
-                main_processing_queue.put(self.download_chunks)
+                    self.progress_bar(100, 1)
+                    console_display(["File Already Exists", "SUCCESS"])
+                    download_button.configure(state=tk.NORMAL)
+                    self.open_folder_with_file()
+                    return
+                else:
+                    # there is a file present but the file size
+                    # doesnt match. file will be downloaded and
+                    # name will have 5 random letter at end
+                    _file_name_list = self.info_dict['file_name'].split(".")
+                    self.info_dict['file_name'] = ''.join(
+                        _file_name_list[:-1]) + "_"+randomString(5) + "." + _file_name_list[-1]
+                    print("file exists. new file name: ",
+                          self.info_dict['file_name'])
+
+                    # console_display(['File Download completed.', "SUCCESS"])
+
+            main_processing_queue.put(self.download_chunks_main)
 
         except ConnectionError as e:
             print(e)
@@ -805,103 +762,220 @@ class FileHandle():
         except Exception as e:
             print(e)
 
-        # defaul url is lcoalhsot. so when I save that it also stores that to the info dict
-        # dictionary. so we need to store our new url and replace it with localhost
-        # self.info_dict['url'] = temp_url
+    def download_chunks_main(self):
+        """main function that generates threads of download_chunk_thread"""
 
-    def mergefiles(self):
-        start = timeit.default_timer()
-        temp_merge_completed = True
-        # console_display(str(already_exists)+" of "+str(self.info_dict['chunk_count'])+ " files already exists")
-        console_display("Finishing up downloading")
-        # input(" enter to forware")
-        # bug if the full file exists but the chunks folder
-        # is not present then it will throw a folder not
-        # existed error
-        temp_chunk_count = str(len(os.listdir(os.path.join(Path.home(),
-                                                           "Downloads", "downloads_data", self.info_dict['dir_to_save_chunk']))))
-        # self.info_dict = info_dict_pr
-        # print(self.info_dict)
-        finished_file_name = (os.path.join(Path.home(), "Downloads",
-                                           self.info_dict['dir_to_save_chunk'][0:-32])+"."+self.info_dict['extension'])
+        if(os.path.isdir(os.path.join(Path.home(), "Downloads",
+                                      "downloads_data",
+                                      self.info_dict['data_key'])) is False):
 
-        if_file_exist_evaluate_filesize = False
-        if os.path.isfile(finished_file_name):
-            if os.path.getsize(finished_file_name) == int(self.info_dict['file_size']):
-                if_file_exist_evaluate_filesize = True
+            # checking if the directory exists to downlaod the file. if doesnt then make one
+            os.mkdir(os.path.join(Path.home(), "Downloads",
+                                  "downloads_data", self.info_dict['data_key']))
 
-        if temp_chunk_count == str(self.info_dict['chunk_count']) or if_file_exist_evaluate_filesize:
+        if active_workers.qsize() < most_working_thread and download_chunk_queue.empty() is not True:
+            # print("active workers: " + str(active_workers.qsize()))
+            active_workers.put("1")
+            main_processing_queue.put(self.download_chunk_thread)
 
-            if (not os.path.isfile(finished_file_name)) or (not if_file_exist_evaluate_filesize):
-                with open(finished_file_name, 'wb') as f:
-                    for key in self.info_dict['file_serial']:
-                        with open(os.path.join(Path.home(), "Downloads", "downloads_data",
-                                               self.info_dict['dir_to_save_chunk'],
-                                               self.info_dict['file_serial'][key]), "rb") as temp:
-                            chunk = temp.read()
-                        f.write(chunk)
-                        # print("ch: ", 18, int(self.info_dict['chunk_count']))
-                        # print("progress 3")
-                        self.progress_bar(
-                            18, int(self.info_dict['chunk_count']))
+        if file_compromised_queue.empty() is not True:
+            # one of the chunks hash didnt match
+            # file is compromised
+            logging.info("aborting download. file compromised")
+            return
+
+        if download_chunk_queue.empty() is not True or active_workers.qsize() > 0:
+            main_processing_queue.put(self.download_chunks_main)
+
+        else:
+            main_processing_queue.put(self.mergefiles())
+
+    def download_chunk_thread(self):
+        """this is main function that downloads
+         a single chunk from server provided
+         with idd(the serial number of chunk"""
+
+        # getting a chunk name from the queue
+        # chunk_info = {name, hash, key}
+        # if chunk_file (the chunk) exists then we
+        # are checking the size of the file
+        # if its not the last chunk of the file
+        # then it should have the size equal to
+        # info_dict['chunk_size']
+
+        chunk_info = download_chunk_queue.get()
+        chunk_file = os.path.join(
+            Path.home(), "Downloads", "downloads_data", self.info_dict['data_key'], chunk_info['name'])
+        if os.path.isfile(chunk_file) is False:
+            # try. there can be a connection error due
+            # to no internet or no server connection
+
+            try:
+                downloaded_chunk = requests.post(self.url+"/download_chunk.php",
+                                                 data={'security_key': security_key,
+                                                       'return_file': 'true',
+                                                       'data_key': self.info_dict['data_key'],
+                                                       'file_name': chunk_info['name']},
+                                                 headers={'User-Agent': user_agent})
+
+                if downloaded_chunk.status_code == 200:
+
+                    if len(downloaded_chunk.content) != 0:
+
+                        """Checking file integrity. chunk_name is the sha-256 hash
+                        of the file. if the hash doesnt match. then cancel the download
+                        and warn the user"""
+
+                        iv = downloaded_chunk.content[0:16]
+                        key = bytes.fromhex(chunk_info['key'])
+                        decrypted_chunk = unpad(AES.new(key, AES.MODE_CBC, iv).decrypt(
+                            downloaded_chunk.content[16:]), AES.block_size)
+
+                        with open('k.png', 'wb') as sb:
+                            sb.write(decrypted_chunk)
+                        chunk_hash = hashlib.sha256(
+                            decrypted_chunk).hexdigest()
+
+                        # print(chunk_info['hash'])
+                        if chunk_hash == chunk_info['hash']:
+                            logging.info("hash matched: "+chunk_info['name'])
+                            with open(chunk_file, 'wb') as chunk_file:
+
+                                chunk_file.write(decrypted_chunk)
+                                # increasing the progress bar
+                                self.progress_bar(
+                                    80, int(self.info_dict['chunk_count']))
+                        else:
+                            file_compromised_queue.put(chunk_info['name'])
+                            logging.info(
+                                "File has been tempared: "+chunk_info['name'])
+                            console_display(
+                                ["Dont Open the file. File has been compromised.", "ERROR"]
+                            )
+
+                    else:
+                        console_display(["Chunk not found in server", "ERROR"])
+                        # self.check_for_chunks()
+                else:
+                    logging.error("chunk: "+chunk_info['name'] +
+                                  " status code: "+downloaded_chunk.status_code)
+
+            except ConnectionError as e:
+                print(e)
+                logging.warning(
+                    "No internet connection in download chunk thread"
+                )
+                console_display(
+                    ["No internet connection, Trying in 5 seconds", "ERROR"]
+                )
+                # if self.download_chunk_thread_count >= 30:
+                #     self.download_chunk_thread_count = 0
+                #     download_button.configure(state=tk.NORMAL)
+                #     return
+                """proper timeout function required"""
+
+                # again try after 2 second. this should be configurabe
+                # a new worker will continue the downlaod when internet
+                # is available again
+                download_chunk_queue.put(chunk_info)
+
+            except Exception as e:
+                # if there is something else other than
+                # connectionerror then print it
+                print(e)
+
+        else:
+            """
+            there is already a file with chunk['name']. if hash
+            matches, then keep the file and increase progress bar.
+            otherwise delete the file and put the chunk_name
+            into download_chunk_queue to redownload
+            """
+            chunk_hash = hashlib.sha256(
+                open(chunk_file, "rb").read()).hexdigest()
+
+            if chunk_hash == chunk_info['hash']:
+                #print("hash matched")
+                #logging.info("hash matched: "+chunk_info['name'])
+                self.progress_bar(80, int(self.info_dict['chunk_count']))
+                self.download_exists_queue.put(chunk_info['name'])
             else:
 
-                # print("progress 780")
-                self.progress_bar(18, 1)
-                console_display(["File Already Exists", "SUCCESS"])
+                os.remove(chunk_file)
+                download_chunk_queue.put(chunk_info)
+
+        # poping a entry from the queue
+        # so a new worker will be created
+        # in download_chunks_main()
+        active_workers.get()
+
+    def mergefiles(self):
+        print('merge files')
+        start = timeit.default_timer()
+        console_display("Finishing up downloading")
+        finished_file_name = os.path.join(
+            Path.home(), "Downloads", self.info_dict['file_name'])
+
+        # below there is two if. if the code is here
+        # thit means one of it has to be true
+        # file checking with below method is
+        # not ideal. we should use some kind
+        # of hashing to be 100% sure
+        # print(os.path.join(Path.home(),
+        #                  "Downloads", "downloads_data",
+        #                 self.info_dict['data_key']))
+        if os.path.isdir(os.path.join(Path.home(),
+                                      "Downloads", "downloads_data", self.info_dict['data_key'])):
+
+            temp_chunk_count = len(os.listdir(os.path.join(
+                Path.home(), "Downloads", "downloads_data", self.info_dict['data_key'])))
+            logging.info("temp chunk count: "+str(temp_chunk_count))
+
+        else:
+            # set to zero otherwise it will throw
+            # error bellow
+            temp_chunk_count = 0
+
+        """if os.path.isfile(finished_file_name):
+            # file chunks folder is not present.
+            # so we will check if the file size
+            # is same as info_dict['file_size']
+
+            if os.path.isfile(finished_file_name):
+                if os.path.getsize(finished_file_name) == int(self.info_dict['file_size']):
+                    if_file_exist_evaluate_filesize = True"""
+
+        # both chunk count should be int or str
+        if int(temp_chunk_count) == int(self.info_dict['chunk_count']):
+            # we have all the required chunks.
+            # merging all the chunks
+
+            with open(finished_file_name, 'wb') as f:
+                for chunk_info in self.info_dict['file_serial']:
+                    # print(chunk_info)
+                    with open(os.path.join(Path.home(), "Downloads", "downloads_data",
+                                           self.info_dict['data_key'],
+                                           chunk_info['name']), "rb") as temp:
+                        chunk = temp.read()
+                    f.write(chunk)
+                    # print("ch: ", 18, int(self.info_dict['chunk_count']))
+                    # print("progress 3")
+                    # increasing progress bar
+                    # 18% is allocated for merging
+                    self.progress_bar(
+                        18, int(self.info_dict['chunk_count']))
+
             download_button.configure(state=tk.NORMAL)
             stop = timeit.default_timer()
             console_display('Merging Files took ' +
                             str(int(stop - start)) + " seconds.")
-            self.missing_chunks_is_retry = False
-            print("missing_chunks_is_Retry at mergefiles: ",
-                  self.missing_chunks_is_retry)
 
+            logging.info("progress bar should be full now")
             # print("progress 790")
-            self.progress_bar(2, 1)
-
-        else:
-            temp_merge_completed = False
-            list_dir_of_chunks_folder = os.listdir(os.path.join(Path.home(), "Downloads",
-                                                                "downloads_data", self.info_dict['dir_to_save_chunk']))
-            for idd in self.info_dict['file_serial']:
-                if self.info_dict['file_serial'][str(idd)] not in list_dir_of_chunks_folder:
-                    download_chunk_queue.put(idd)
-            # print( download_chunk_queue.qsize())
-            # print(idd)
-            # print(list_dir_of_chunks_folder)
-            print(self.info_dict['file_serial'])
-            if self.merge_files_try_count >= 5:
-                console_display(
-                    ["Files failed to download because files are not present on the server", "ERROR"])
-                console_display(["Upload the file again", "ERROR"])
-                self.merge_files_try_count = 0
-                download_button.configure(state=tk.NORMAL)
-                return
-            self.merge_files_try_count += 1
-            console_display(str(len(os.listdir(os.path.join(Path.home(), "Downloads",
-                                                            "downloads_data", self.info_dict['dir_to_save_chunk'])))) +
-                            " of " + str(self.info_dict['chunk_count']) + " downloaded")
-            console_display(
-                ["There are some missing chunks. Retrying", "ERROR"])
-            console_display("Trying to find missing chunks in the server")
-
-            self.missing_chunks_is_retry = True
-            if len(os.listdir(os.path.join(Path.home(), "Downloads",
-                                           "downloads_data", self.info_dict['dir_to_save_chunk']))) < int(self.info_dict['chunk_count']):
-                # self.download_info_dict() #this reset the downlaod loop from begining
-                time.sleep(wait_time_before_trying_missing_chunks_download)
-                self.missing_chunks_download()
-
-        if temp_merge_completed:
-            # if merging done then this will wxwcute. other wise
-            # temp_merge_completed will be false on else section
-
-            print("downoload completed")
-            # download_button.configure(state=tk.NORMAL)
-            if download_exists_queue.qsize() > 0:
+            if self.download_exists_queue.qsize() > 0:
                 temp_chunks_percentage = str(
-                    (download_exists_queue.qsize()/int(self.info_dict['chunk_count']))*100)
+                    (math.ceil(self.download_exists_queue.qsize()
+                               / int(self.info_dict['chunk_count']))*100))
                 console_display(
                     [temp_chunks_percentage+"% of the file was downloaded before.", "BLUE"])
                 if upload_exists_queue.mutex:
@@ -911,60 +985,351 @@ class FileHandle():
                         upload_exists_queue.queue.clear()
                     except Exception as e:
                         print(e)
-            if if_download_file_exists:
-                self.progress_bar(100, 1)
+
             console_display("Chunks Download Completed: "
-                            + self.info_dict['dir_to_save_chunk'][0:-32]
-                            + "."+self.info_dict['extension'])
+                            + self.info_dict['file_name'])
             print("open folder ")
             console_display(["Download Finished!", "SUCCESS"])
             self.open_folder_with_file()
 
-    def threading_upload(self, idd, url):
+            self.progress_bar(2, 1)
+
+        else:
+            # os.listdir below can throw error if the
+            # folder to store chunks is not present
+            # but for now it should work.
+            # will be fixed in future update
+            print(self.info_dict['chunk_count'])
+            print(temp_chunk_count)
+
+            list_dir_of_chunks_folder = os.listdir(os.path.join(Path.home(), "Downloads",
+                                                                "downloads_data", self.info_dict['data_key']))
+
+            for chunk_info in self.info_dict['file_serial']:
+                if not (chunk_info['name'] in list_dir_of_chunks_folder):
+                    print(chunk_info)
+                    download_chunk_queue.put(chunk_info)
+
+            if self.merge_files_try_count >= 5:
+                console_display(
+                    ["Files failed to download because files are not present on the server", "ERROR"])
+                console_display(["Upload the file again", "ERROR"])
+                self.merge_files_try_count = 0
+                download_button.configure(state=tk.NORMAL)
+                return
+            self.merge_files_try_count += 1
+            console_display(str(len(os.listdir(os.path.join(Path.home(), "Downloads",
+                                                            "downloads_data", self.info_dict['data_key'])))) +
+                            " of " + str(self.info_dict['chunk_count']) + " downloaded")
+
+            console_display(
+                ["There are some missing parts. Retrying", "ERROR"])
+            console_display("Trying to find missing chunks in the server")
+
+            # self.missing_chunks_is_retry = True
+            # if len(os.listdir(os.path.join(Path.home(), "Downloads",
+            #                                "downloads_data", self.info_dict['data_key']))) < int(self.info_dict['chunk_count']):
+            #     # self.download_info_dict() #this reset the downlaod loop from begining
+            #     time.sleep(wait_time_before_trying_missing_chunks_download)
+            #     # self.missing_chunks_download()
+            self.download_chunks_main()
+
+    def open_folder_with_file(self):
+
+        if os.path.isfile(os.path.join(Path.home(), "Downloads",
+                                       self.info_dict['file_name'])) is True:
+
+            # a hack fix to fetch latest directory data
+            # do not use a while loop or any other loop
+            # in tkinter mainloop.
+
+            os.path.getmtime(os.path.join(Path.home(), "Downloads"))
+            if os_platform == 'Windows':
+                popen_open = 'explorer /select,"'+os.path.join(Path.home(
+                ), "Downloads", self.info_dict['file_name'])+'"'
+                subprocess.Popen(popen_open)
+            else:
+                opener = "open" if sys.platform == "darwin" else "xdg-open"
+                subprocess.call(
+                    [opener, os.path.join(Path.home(), "Downloads")])
+            # print([popen_open])
+        else:
+            self.root.after(200, self.open_folder_with_file)
+
+
+class UploadHandler():
+    def __init__(self, data_file=None, url=hard_coded_url, data_key_box_str=None,
+                 root=None, progress_bar=None):
+        self.data_key_box_str = data_key_box_str
+        self.data_key_box_str.set("muahhaha")
+        self.progress_bar = progress_bar
+        self.root = root
+        self.url = url
+        self.offset = 0
+        self.active_workers = queue.Queue()
+        self.raw_chunk_data_queue = queue.Queue()
+        self.info_dict = {}
+        self.progress_bar(False, 1)
+        self.already_uploaded_list = None
+        # reming "/" from url if exists
+        if len(self.url) > 5:
+            if self.url[-1] == "/":
+
+                self.url = self.url[-1]
+            # self.url = host_entry.get()
+        else:
+            console_display(["Please provide a valid server.", "ERROR"])
+            upload_button_upload_section.configure(state=tk.NORMAL)
+            select_file_button.configure(state=tk.NORMAL)
+            return
+
+        if os.path.isdir(os.path.join(Path.home(), "Downloads", "uploads_of_file_sharing")) is False:
+            os.mkdir(os.path.join(Path.home(), "Downloads",
+                                  "uploads_of_file_sharing"))
+
+        # this counter are used to determine how many time certain
+        # function has failed due to no inter or connection error to the server
+        self.count_no_internet = 0
+        self.threading_upload_count = 0
+        self.download_chunk_thread_count = 0
+        self.merge_files_try_count = 0
+        self.missing_chunks_is_retry = False
+        self.upload_dict_info_count = 0
+
+        self.data_file = data_file
+        self.data_key = os.path.basename(data_file).split(
+            ".")[0].replace(" ", "_")+hashgen(data_file)
+        if os.path.isdir(os.path.join(Path.home(), "Downloads", "uploads_of_file_sharing", self.data_key)) is False:
+            os.mkdir(os.path.join(Path.home(), "Downloads",
+                                  "uploads_of_file_sharing", self.data_key))
+
+        if(os.path.getsize(data_file) <= 5*mb):
+            self.info_dict['chunk_size'] = os.path.getsize(data_file)
+            self.info_dict['chunk_count'] = 1
+
+        else:
+            self.info_dict['chunk_size'] = 5*mb
+            self.info_dict['chunk_count'] = math.ceil(
+                os.path.getsize(data_file) / self.info_dict['chunk_size'])
+
+        self.file = open(data_file, "rb")
+        # self.file_unique_identifier = hashlib.sha256(
+        #     self.file.read(1000)).hexdigest()
+        # print("file_unique identifier: ", self.file_unique_identifier)
+        # self.file.seek(0)
+
+        self.info_dict['data_key'] = hashlib.sha256(
+            os.urandom(256)).hexdigest()
+
+        self.data_key_box_str.set(self.info_dict['data_key'])
+        self.info_dict_private_key = hashlib.sha512(
+            os.urandom(256)).hexdigest()
+
+        self.info_dict['file_name'] = os.path.basename(data_file)
+        self.data_key = self.info_dict['data_key']
+        self.info_dict['file_serial'] = []
+        self.info_dict['file_size'] = os.path.getsize(data_file)
+
+        logging.info("Minimum chunk size is " +
+                     str(self.info_dict["chunk_size"]/mb)+" mb")
+        logging.info("File is divided into " +
+                     str(self.info_dict['chunk_count'])+" chunks.")
+
+        console_display("File uploading started.")
+
+        # security_key will be replaced with api_key
+        self.security_key = security_key
+        print("file size is ", os.path.getsize(data_file))
+        print("chunk count is ", self.info_dict['chunk_count'])
+        self.info_dict_setup_done = False
+        self.progress_bar(1, 1)
+
+    def upload_info_dict(self):
+        """
+        * uploads info_dict to server
+        * should only be called after all chunks are uploaded
+        """
+
+        try:
+            if self.info_dict['file_size'] < mb:
+                _file_size = "{:.1f}".format(
+                    self.info_dict['file_size'] / kb) + " KB"
+            else:
+                _file_size = "{:.1f}".format(
+                    self.info_dict['file_size'] / mb) + " MB"
+
+            if len(self.info_dict['file_name']) > 25:
+                _file_name = self.info_dict['file_name'][0:25] + "..."
+            else:
+                _file_name = self.info_dict['file_name'][0:35]
+
+            key = hashlib.sha256(os.urandom(512)).digest()
+
+            # encrypting file_basic_info
+            self.file_basic_info = {'file_name': _file_name,
+                                    'file_size': _file_size,
+                                    'message': '',
+                                    'type': os.path.splitext(self.info_dict['file_name'])[1]
+                                    }
+            iv = os.urandom(16)
+            file_chunk = AES.new(key, AES.MODE_CBC, iv).encrypt(
+                pad(json.dumps(self.file_basic_info).encode(), AES.block_size))
+            self.file_basic_info = iv + file_chunk
+
+            # encrypting info_dict
+            iv = os.urandom(16)
+            file_chunk = AES.new(key, AES.MODE_CBC, iv).encrypt(
+                pad(json.dumps(self.info_dict).encode(), AES.block_size))
+            checksum = hashlib.sha256(json.dumps(
+                self.info_dict).encode()).digest()
+            self.info_dict = iv + file_chunk
+
+            a = requests.post(url=self.url+"/process_info_dict.php",
+                              data={'security_key': self.security_key,
+                                    'upload_info_dict': 'true',
+                                    'data_key': self.data_key,
+                                    'info_dict_private_key': self.info_dict_private_key
+
+                                    },
+                              files={
+                                  'info_dict': self.info_dict,
+                                  'file_basic_info': self.file_basic_info
+                              },
+                              headers={'User-Agent': user_agent})
+            print(a.content)
+            self.progress_bar(2, 1)
+            select_file_button.configure(state=tk.NORMAL)
+            upload_button_upload_section.configure(state=tk.NORMAL)
+            console_display(["File uploaded successfully", "SUCCESS"])
+            self.data_key_box_str.set(
+                "http://localhost:3000/"+"download/?&id="+self.data_key+"&key="+key.hex()+"&checksum="+checksum.hex())
+
+        except ConnectionError as e:
+            logging.error(e)
+            if self.upload_dict_info_count >= 30:
+                self.upload_dict_info_count = 0
+                upload_button_upload_section.configure(state=tk.NORMAL)
+                select_file_button.configure(state=tk.NORMAL)
+
+                console_display(
+                    ["Upload failed due to no internet, try again later.", "ERROR"])
+                return
+            console_display(
+                ["No internet connection, Trying in 5 seconds", "ERROR"])
+            self.upload_dict_info_count += 1
+            time.sleep(5)
+            main_processing_queue.put(self.upload_info_dict)
+
+        except Exception as e:
+            logging.error(e)
+
+    def start_upload(self):
+        """
+        * inititates file upload
+        * this function will be called periodically
+        * and it will launch necessary threads to upload chunks
+        * after assigning UploadHandler class. calling this
+        * function once is enough
+        """
+        if not self.info_dict_setup_done:
+            print("private key is ", self.info_dict_private_key)
+            logging.info("private key is "+self.info_dict_private_key)
+            if (requests.post(self.url+"/process_info_dict.php", data={
+                'security_key': self.security_key,
+                'set_info_dict': 'true',
+                'data_key': self.data_key,
+                'info_dict_private_key': self.info_dict_private_key
+            }).json()['code'] == True):
+                self.info_dict_setup_done = True
+                logging.info("info_dict setup done")
+                self.progress_bar(1, 1)
+        if self.already_uploaded_list == None:
+
+            self.already_uploaded_list = requests.post(self.url+"/already_uploaded_list.php", data={
+                'security_key': self.security_key,
+                'data_key': self.data_key},
+                headers={'User-Agent': user_agent}
+            ).json()['data']
+
+            print(" already uploaded : ", self.already_uploaded_list)
+
+        if self.file.tell() < self.info_dict['file_size']:
+            if self.active_workers.qsize() < 5:
+                """
+                * if there is less then 5 working upload thread. then
+                * it wil lread a specified file chunk. then encrypt 
+                * it and put that chunk in a queue to upload
+                """
+                # file_chunk = self.file.read(self.info_dict['chunk_size'])
+
+                # in bytes. should be saved in hex string
+                key = hashlib.sha256(os.urandom(512)).digest()
+                iv = os.urandom(16)
+                _file_chunk = self.file.read(self.info_dict['chunk_size'])
+                file_chunk = AES.new(key, AES.MODE_CBC, iv).encrypt(
+                    pad(_file_chunk, AES.block_size))
+
+                file_chunk = iv + file_chunk  # adding iv with chunk
+                chunk_hash = hashlib.sha256(_file_chunk).hexdigest()
+                chunk_name = hashlib.sha256(os.urandom(512)).hexdigest()
+                self.info_dict['file_serial'].append({'name': chunk_name,
+                                                      'hash': chunk_hash,
+                                                      'key': key.hex()})
+
+                self.raw_chunk_data_queue.put({
+                    'file_chunk': file_chunk,
+                    'chunk_name': chunk_name
+                })
+                self.active_workers.put(1)
+                main_processing_queue.put(self.upload_in_chunks)
+
+        elif self.active_workers.qsize() == 0:
+            print("upload successfull")
+            main_processing_queue.put(self.upload_info_dict)
+            return
+
+        main_processing_queue.put(self.start_upload)
+
+    def upload_in_chunks(self):
+        """it will upload one chunk of file"""
+        if self.raw_chunk_data_queue.empty() is True:
+            logging.info("No chunks to upload")
+            return
+        file_chunk_dict = self.raw_chunk_data_queue.get()
+
         try:
             if len(host_entry.get()) < 5:
                 return
-            temp_req_file_count_exist_check = requests.post(
-                self.url+"/file_count.php",
-                json={'security_key': security_key,
-                      "data_key": self.info_dict['dir_to_save_chunk'],
-                      "file_name": self.info_dict['file_serial'][str(idd)]},
-                headers={'User-Agent': user_agent,
-                         'Content-Type': 'application/json'}).text
-            print(self.url+"/file_count.php")
-            if temp_req_file_count_exist_check == "False":
+
+            if file_chunk_dict['chunk_name'] not in self.already_uploaded_list:
                 # print("false")
-                files = {'split_file': (self.info_dict['file_serial'][str(idd)],
-                                        open(os.path.join(Path.home(), "Downloads", "uploads_of_file_sharing", self.info_dict['dir_to_save_chunk'],
-                                                          self.info_dict['file_serial'][str(idd)]), "rb"),
+                files = {'split_file': (file_chunk_dict['chunk_name'], file_chunk_dict['file_chunk'],
                                         'multipart/form-data')}
 
                 data_obj = {'security_key': security_key,
-                            'id': idd,
-                            'file_name': self.info_dict['file_serial'][str(idd)],
-                            'data_key': self.info_dict['dir_to_save_chunk']}
+                            'id': 1,
+                            'file_name': file_chunk_dict['chunk_name'],
+                            'data_key': self.info_dict['data_key']}
 
                 # upload.php receiving data and files. need to configure
                 # update
-                a = requests.post(url, files=files, data=data_obj,
-                                  headers={'User-Agent': user_agent})  # finally uploading the file by post
-                # console_display(a.text)
+                #  print(self.url+"/upload.php")
+                upload_req = requests.post(self.url+"/upload.php", files=files, data=data_obj,
+                                           headers={'User-Agent': user_agent}).json()
+                # print(upload_req)
+                if upload_req['code'] == True or upload_req['file_exists'] == True:
+                    self.progress_bar(96, int(self.info_dict['chunk_count']))
 
-                if a.text != self.info_dict['file_serial'][str(idd)] and a.text != 'file_exists':
-                    failed_chunk_queue.put(idd)
+                else:
+                    logging.warning('File not uploded: ' +
+                                    file_chunk_dict['chunk_name'])
+                    self.raw_chunk_data_queue.put(file_chunk_dict)
 
-                print(a.text)
-                # console_display([a.text, "SUCCESS"])
-
-            elif temp_req_file_count_exist_check == "True":
-                # console_display("Chunk exist on server: " + self.info_dict['file_serial'][str(idd)])
-                upload_exists_queue.put(
-                    self.info_dict['file_serial'][str(idd)])
             else:
-                print("main_processing_queue.put: ",
-                      temp_req_file_count_exist_check)
-                print("file not uploaded properly: 903")
-                # increase progress bar by the required value
+                upload_exists_queue.put(file_chunk_dict['chunk_name'])
+                print('file exists: ', file_chunk_dict['chunk_name'])
+                self.progress_bar(96, int(self.info_dict['chunk_count']))
+
         except ConnectionError as e:
             print(e)
             if self.threading_upload_count >= 30:
@@ -978,352 +1343,13 @@ class FileHandle():
             console_display(
                 ["No internet connection, Trying in 5 seconds", "ERROR"])
             self.threading_upload_count += 1
-            self.root.after(5000, self.threading_upload, idd, url)
-            # self.root.update_idletasks()
-            # self.root.update()
-        # print("progress 888")
-        self.progress_bar(78, int(self.info_dict['chunk_count']))
+            # seeing the file . so it can be read later
+            print('priv file.tell(): ', self.file.tell())
+            self.file.seek(self.file.tell() - self.info_dict['chunk_size'])
+            print('after seek file.tell(): ', self.file.tell())
+            main_processing_queue.put(self.upload_in_chunks)
 
-    def upload_chunks(self):
-        global upload_submit_thread
-        upload_submit_thread = threading.Thread(target=self.upload_chunks_main)
-        upload_submit_thread.daemon = True
-        upload_submit_thread.start()
-        self.root.after(500, self.check_upload_submit_thread)
-
-    def check_failed_chunk_upload_thread(self):
-        if self.missing_chunk_thread.is_alive():
-            self.root.after(500, self.check_missing_chunk_thread)
-        else:
-            self.check_upload_submit_thread()
-
-    def failed_chunk_upload(self):
-
-        temp_upload_idd_list = list()
-        while failed_chunk_queue.empty() != True:
-            temp_upload_idd_list.append(failed_chunk_queue.get())
-
-        if failed_chunk_queue.mutex:
-            failed_chunk_queue.queue.clear()
-        else:
-            try:
-                failed_chunk_queue.queue.clear()
-            except Exception as e:
-                print(e)
-
-        self.missing_chunk_thread = threading.Thread(target=self.upload_chunks_main(),
-                                                     kwargs={'custom_idd': temp_upload_idd_list})
-
-        self.missing_chunk_thread.daemon = True
-        self.missing_chunk_thread.start()
-        self.root.after(500, self.check_failed_chunk_upload_thread)
-
-    def check_upload_submit_thread(self):
-        if upload_submit_thread.is_alive():
-            self.root.after(500, self.check_upload_submit_thread)
-        else:
-            if failed_chunk_queue.qsize() > 0:
-                time.sleep(wait_time_before_trying_failed_uploads)
-                self.failed_chunk_upload()
-            else:
-                # print("progress 935")
-                self.progress_bar(2, 1)
-                select_file_button.configure(state=tk.NORMAL)
-                upload_button_upload_section.configure(state=tk.NORMAL)
-                if upload_exists_queue.qsize() > 0:
-                    temp_chunks_percentage = str(
-                        (upload_exists_queue.qsize()/int(self.info_dict['chunk_count']))*100)
-                    console_display(
-                        [temp_chunks_percentage+"% of the file already existed in the server.", "BLUE"])
-                    if upload_exists_queue.mutex:
-                        upload_exists_queue.queue.clear()
-                    else:
-                        try:
-                            upload_exists_queue.queue.clear()
-                        except Exception as e:
-                            print(e)
-                # console_display("Upload completed")
-                console_display(
-                    ["File upload complete of "+self.filename, 'SUCCESS'])
-
-    def upload_chunks_main(self, custom_idd=None):
-        """is custom_idd is given then it will iterate
-         over that idd list and try to upload. if not given then
-          it will upload everything from info_dict['file_Serial]"""
-
-        start = timeit.default_timer()
-        dict_info = self.info_dict
-        url = self.url+"/upload.php"
-
-        threads = list()
-        idd_list = list()
-
-        if(len(dict_info['file_serial']) < most_working_thread):
-            thread_count = len(dict_info['file_serial'])
-        else:
-            thread_count = most_working_thread
-
-        work_count = thread_count
-        if custom_idd is not None:
-            idd_list = custom_idd
-        else:
-            for idd in dict_info['file_serial']:
-                idd_list.append(idd)
-        # thr_cou = 0
-        # print(idd_list)
-        for i in range(thread_count):
-            x = threading.Thread(
-                target=self.threading_upload, args=(idd_list[i], url))
-            # console_display( "thread started: " + str(thr_cou))
-            # thr_cou += 1
-            x.daemon = True
-            threads.append(x)
-            x.start()
-        # print(threads)
-        while len(threads) > 0:
-            """continue the loop until all all threads finish working"""
-            for thread in threads:
-                if not thread.is_alive():
-                    threads.pop(threads.index(thread))
-                    # print("kaj")
-                    if work_count != len(idd_list):
-                        x = threading.Thread(target=self.threading_upload,
-                                             args=(idd_list[work_count], url))
-                        # console_display( "thread started: " + str(thr_cou))
-                        # thr_cou += 1
-                        work_count += 1
-                        x.daemon = True
-                        threads.append(x)
-                        x.start()
-
-        stop = timeit.default_timer()
-        console_display('Uploading files took ' +
-                        str(int(stop - start)) + " seconds.")
-
-    def download_chunks(self):
-        """main function to download chunks from sever
-        all chunks will be downloaded via a different thread.
-        this function accepts no extra argument. but info_dict
-        should have all the required value"""
-
-        self.submit_thread_download = threading.Thread(
-            target=self.download_chunks_main)
-        self.submit_thread_download.daemon = True
-        self.submit_thread_download.start()
-        self.root.after(500, self.check_thread_download)
-
-    def open_folder_with_file(self):
-
-        if os.path.isfile(os.path.join(Path.home(), "Downloads",
-                                       self.info_dict['dir_to_save_chunk'][0:-32]) + "."+self.info_dict['extension']) is True:
-
-            # a hack fix to fetch latest directory data
-            # do not use a while loop or any other loop
-            # in tkinter mainloop.
-
-            os.path.getmtime(os.path.join(Path.home(), "Downloads"))
-            if os_platform == 'Windows':
-                popen_open = 'explorer /select,"'+os.path.join(Path.home(
-                ), "Downloads", self.info_dict['dir_to_save_chunk'][0:-32]) + "."+self.info_dict['extension']+'"'
-                subprocess.Popen(popen_open)
-            else:
-                opener = "open" if sys.platform == "darwin" else "xdg-open"
-                subprocess.call(
-                    [opener, os.path.join(Path.home(), "Downloads")])
-            # print([popen_open])
-        else:
-            self.root.after(200, self.open_folder_with_file)
-
-    def check_thread_download(self):
-        if self.submit_thread_download.is_alive():
-            self.root.after(500, self.check_thread_download)
-        else:
-            # console_display("Download completed")
-            main_processing_queue.put(self.mergefiles)
-
-        # print("cheching thread_downlaod")
-    def download_chunks_main(self, custom_idd=None):
-        """main function that is called with an individual thread"""
-
-        start = timeit.default_timer()
-
-        if(os.path.isdir(os.path.join(Path.home(), "Downloads", "downloads_data",
-                                      self.info_dict['dir_to_save_chunk'])) is False):
-            # checking if the directory exists to downlaod the file. if doesnt then make one
-            os.mkdir(os.path.join(Path.home(), "Downloads",
-                                  "downloads_data", self.info_dict['dir_to_save_chunk']))
-
-        # threds will hold all the threads that
-        # will be created to download files
-        threads = list()
-        idd_list = list()
-
-        if(len(self.info_dict['file_serial']) < most_working_thread):
-            thread_count = len(self.info_dict['file_serial'])
-        else:
-            thread_count = most_working_thread
-
-        work_count = thread_count
-        # print("work_count: ", work_count)
-        if custom_idd is None:
-            for idd in range(len(self.info_dict['file_serial'])):
-                idd_list.append(idd)
-        else:
-            idd_list = custom_idd
-
-        # thr_cou = 0
-
-        # iniliazing with firsts threads
-        for i in range(thread_count):
-            x = threading.Thread(
-                target=self.download_chunk_thread, args=(idd_list[i], ))
-            x.daemon = True
-            threads.append(x)
-            x.start()
-
-        # run till all the download is done
-        while len(threads) > 0:
-            # it will iterate over the threads list
-            # and check if the threads is alive
-            # if its not then it will create another
-            # thread if there is any download left
-            for thread in threads:
-
-                if not thread.is_alive():
-                    threads.pop(threads.index(thread))
-                    if work_count != len(idd_list):
-                        x = threading.Thread(
-                            target=self.download_chunk_thread, args=(idd_list[work_count], ))
-                        work_count += 1
-                        x.daemon = True
-                        threads.append(x)
-                        x.start()
-
-                time.sleep(0.2)
-
-        stop = timeit.default_timer()
-        console_display('Downloading Files took ' +
-                        str(int(stop - start))+' seconds')
-
-    def check_missing_chunk_thread(self):
-        if self.missing_chunk_thread.is_alive():
-            self.root.after(500, self.check_missing_chunk_thread)
-        else:
-            main_processing_queue.put(self.mergefiles)
-
-    def missing_chunks_download(self):
-        temp_idd_list = list()
-        while download_chunk_queue.empty() != True:
-            temp_idd_list.append(download_chunk_queue.get())
-
-        if download_chunk_queue.mutex:
-            download_chunk_queue.queue.clear()
-        else:
-            try:
-                download_chunk_queue.queue.clear()
-            except Exception as e:
-                print(e)
-
-        self.missing_chunk_thread = threading.Thread(target=self.download_chunks_main,
-                                                     kwargs={'custom_idd': temp_idd_list})
-        self.missing_chunk_thread.daemon = True
-        self.missing_chunk_thread.start()
-        self.root.after(500, self.check_missing_chunk_thread)
-
-    def download_chunk_thread(self, idd):
-        """this is main function that downloads
-         a single chunk from server provided 
-         with idd(the serial number of chunk"""
-
-        down_file = os.path.join(Path.home(), "Downloads", "downloads_data", self.info_dict['dir_to_save_chunk'],
-                                 self.info_dict['file_serial'][str(idd)])
-
-        proceed = False
-
-        # if down_file (the chunk) exists then we
-        # are checking the size of the file
-        # if its not the last chunk of the file
-        # then it should have the size equal to
-        # info_dict['chunk_size']
-        if os.path.isfile(down_file) is True:
-            if not int(idd) == (int(self.info_dict['chunk_count']) - 1):
-                if not os.path.getsize(down_file) == 5*mb:
-                    proceed = True
-        temp_missing_check = True
-        if((os.path.isfile(down_file) is False) or proceed):
-
-            # try. there can be a connection error due
-            # to no internet or no server connection
-
-            try:
-                # this code
-
-                chunk_verify = requests.post(self.url+"/download_chunk.php",
-                                             json={'security_key': security_key,
-                                                   'data_key': self.info_dict['dir_to_save_chunk'],
-                                                   'file_name': self.info_dict['file_serial'][str(idd)]},
-                                             headers={'User-Agent': user_agent, 'Content-Type': 'application/json'})
-
-                if len(chunk_verify.content) > 0:
-                    # server should reply with 'True' if chunk
-                    # exists. so len of chunk_verify.content
-                    # has to be greater than 0
-
-                    print("chunk verify content: ", chunk_verify.content)
-                    if (chunk_verify.text == 'True' and chunk_verify.status_code == 200):
-                        downloaded_chunk = requests.post(self.url+"/download_chunk.php",
-                                                         json={'security_key': security_key,
-                                                               'return_file': 'true',
-                                                               'data_key': self.info_dict['dir_to_save_chunk'],
-                                                                  'file_name': self.info_dict['file_serial'][str(idd)]},
-                                                         headers={'User-Agent': user_agent,
-                                                                  'Content-Type': 'application/json'})
-                        open(down_file, 'wb').write(downloaded_chunk.content)
-
-                    else:
-                        console_display(
-                            f"chunk {str(idd)} of {self.info_dict['dir_to_save_chunk']} doesnt exist on server")
-
-                else:
-                    # this means there is a chunk missed
-                    # it can be dure to the user is still
-                    # uploading the chunk. So we have a
-                    # function to check for missing chunks
-                    temp_missing_check = False
-                    print(
-                        f"chunk {str(idd)} of {self.info_dict['dir_to_save_chunk']} returned nothing")
-
-            except ConnectionError as e:
-                print(e)
-                temp_missing_check = False
-                print("No internet connection in download chunk thread")
-                console_display(
-                    ["No internet connection, Trying in 5 seconds", "ERROR"])
-                if self.download_chunk_thread_count >= 30:
-                    self.download_chunk_thread_count = 0
-                    download_button.configure(state=tk.NORMAL)
-                    return
-
-                self.root.after(5000, self.download_chunk_thread, idd)
-                # self.root.update_idletasks()
-                # self.root.update()
-
-            except Exception as e:
-                # if there is something else other than
-                # connectionerror then print it
-                print(e)
-                temp_missing_check = False
-
-        else:
-            # this means there is already a file named same.
-            # so we put its idd to a queue
-            # in order to see how much of the file was previously
-            # downloded
-            download_exists_queue.put(str(idd))
-
-        if temp_missing_check:
-            # incresing the prgress but if temp_missing_check is true
-            self.progress_bar(80, int(self.info_dict['chunk_count']))
+        self.active_workers.get()
 
 
 class App:
