@@ -1234,12 +1234,14 @@ class UploadHandler():
         if not self.info_dict_setup_done:
             print("private key is ", self.info_dict_private_key)
             logging.info("private key is "+self.info_dict_private_key)
+            
             if (requests.post(self.url+"/process_info_dict.php", data={
                 'security_key': self.security_key,
                 'set_info_dict': 'true',
                 'data_key': self.data_key,
                 'info_dict_private_key': self.info_dict_private_key
-            }).json()['code'] == True):
+            },
+                headers={'User-Agent': user_agent}).json()['code'] == True):
                 self.info_dict_setup_done = True
                 logging.info("info_dict setup done")
                 self.progress_bar(1, 1)
