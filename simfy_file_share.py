@@ -1202,7 +1202,7 @@ class UploadHandler():
             upload_button_upload_section.configure(state=tk.NORMAL)
             console_display(["File uploaded successfully", "SUCCESS"])
             self.data_key_box_str.set(
-                "http://localhost:3000/"+"download/?&id="+self.data_key+"&key="+key.hex()+"&checksum="+checksum.hex())
+                self.url+"/download/?&id="+self.data_key+"&key="+key.hex()+"&checksum="+checksum.hex())
 
         except ConnectionError as e:
             logging.error(e)
