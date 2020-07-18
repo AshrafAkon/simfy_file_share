@@ -12,6 +12,7 @@ other operating systems as long as it supports Python 3.
 1. requests (`pip install requests`)
 2. psutil (`pip install psutil`)
 3. pyperclip (`pip install pyperclip`)
+4. pycryptodome (`pip install pycryptodome`)
    > replace pip with pip3 in linux
 
 ### Steps to run:
